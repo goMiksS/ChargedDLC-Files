@@ -16,6 +16,8 @@ async def on_startup(bot: Bot):
     Path(MEDIA_DIR).mkdir(exist_ok=True)
     await init_db()
     await clean_old_messages()
+    # Удаляем вебхук на всякий случай, чтобы не было Conflict
+    await bot.delete_webhook(drop_pending_updates=True)
     me = await bot.get_me()
     print(f"✅ {me.full_name} (@{me.username}) запущен | ModdedInvoker")
 
@@ -29,6 +31,7 @@ async def main():
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
+    # Важно: commands ПЕРВЫМ, fun потом (чтобы catch-all не перехватывал)
     dp.include_router(commands.router)
     dp.include_router(fun.router)
     dp.include_router(business.router)
