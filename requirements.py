@@ -1,3 +1,3 @@
-aiogram==3.4.0
+pyrogram==2.0.106
+tgcrypto==1.2.5
 python-dotenv==1.0.0
-aiohttp==3.9.1
