@@ -16,7 +16,7 @@ router = Router()
 KNOWN = {
     "help", "помощь", "stats", "стата", "stat", "settings", "настройки", "set",
     "profile", "я", "me", "id", "ping", "version", "about", "search", "export",
-    "clear", "last", "media", "admin", "users", "clean", "broadcast",
+    "clear", "last", "media", "admin", "users", "clean", "broadcast", "shop", "vip", "магазин", "give",
     "sw", "reverse", "upper", "lower", "count", "leet", "kawaii", "love",
     "type", "say", "repeat", "random", "choose", "coin", "flip", "dice",
     "ball", "8ball", "password", "uuid", "calc", "ship", "rate", "howgay",
@@ -471,4 +471,4 @@ async def unknown_dot(message: Message):
     await safe_edit(
         message,
         f"Команда <code>.{html.escape(name)}</code> не найдена.\nНапиши <code>.help</code>"
-    )
+                   )
