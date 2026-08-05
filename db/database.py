@@ -62,6 +62,19 @@ async def init_db():
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_msg_user ON messages(user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_msg_chat ON messages(chat_id, message_id)")
+        # VIP / trial columns
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN subscription_until TEXT")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN is_vip INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN trial_used INTEGER DEFAULT 0")
+        except Exception:
+            pass
         await db.commit()
 
 async def register_user(user_id: int, username: str, full_name: str, business_connection_id: str = None):
@@ -191,3 +204,74 @@ async def export_user_messages(user_id: int, limit: int = 1000):
         """, (user_id, limit)) as cur:
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
+
+
+async def get_subscription(user_id: int) -> dict:
+    """Возвращает статус подписки."""
+    from datetime import datetime
+    user = await get_user(user_id)
+    if not user:
+        return {"active": False, "until": None, "is_vip": False, "trial_used": False}
+    until = user["subscription_until"] if "subscription_until" in user.keys() else None
+    is_vip = bool(user["is_vip"]) if "is_vip" in user.keys() else False
+    trial_used = bool(user["trial_used"]) if "trial_used" in user.keys() else False
+    active = False
+    if until:
+        try:
+            active = datetime.fromisoformat(until) > datetime.now()
+        except Exception:
+            active = False
+    return {"active": active, "until": until, "is_vip": is_vip and active, "trial_used": trial_used}
+
+
+async def grant_days(user_id: int, days: int, make_vip: bool = True):
+    """Выдать дни подписки (админ)."""
+    from datetime import datetime, timedelta
+    import aiosqlite
+    from config import DB_PATH
+    sub = await get_subscription(user_id)
+    now = datetime.now()
+    if sub["until"]:
+        try:
+            base = datetime.fromisoformat(sub["until"])
+            if base < now:
+                base = now
+        except Exception:
+            base = now
+    else:
+        base = now
+    new_until = (base + timedelta(days=days)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET subscription_until = ?, is_vip = ? WHERE user_id = ?",
+            (new_until, 1 if make_vip else 0, user_id)
+        )
+        await db.commit()
+    return new_until
+
+
+async def start_trial(user_id: int, days: int = 3) -> bool:
+    """Запустить пробный период. Возвращает True если выдан."""
+    from datetime import datetime, timedelta
+    import aiosqlite
+    from config import DB_PATH
+    sub = await get_subscription(user_id)
+    if sub["trial_used"] or sub["active"]:
+        return False
+    until = (datetime.now() + timedelta(days=days)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET subscription_until = ?, is_vip = 1, trial_used = 1 WHERE user_id = ?",
+            (until, user_id)
+        )
+        await db.commit()
+    return True
+
+
+async def has_access(user_id: int) -> bool:
+    """Есть ли доступ (trial/VIP или админ)."""
+    from config import ADMIN_ID
+    if user_id == ADMIN_ID:
+        return True
+    sub = await get_subscription(user_id)
+    return sub["active"]
