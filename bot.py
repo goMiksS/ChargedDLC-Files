@@ -17,7 +17,7 @@ async def on_startup(bot: Bot):
     await init_db()
     await clean_old_messages()
     me = await bot.get_me()
-    print(f"✅ {me.full_name} (@{me.username}) запущен | SaveMod++ by Grok")
+    print(f"✅ {me.full_name} (@{me.username}) запущен | ModdedInvoker")
 
 async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
