@@ -9,6 +9,9 @@ BOT_NAME = "ModdedInvoker"
 VERSION = "2.0.0"
 CMD_PREFIX = "."
 
+# Сервер Telegram API (если используется локальный сервер Bot API, иначе None или "https://api.telegram.org")
+LOCAL_SERVER_URL = None
+
 # База данных и файлы
 DB_PATH = "bot_database.db"
 MEDIA_DIR = "media"
