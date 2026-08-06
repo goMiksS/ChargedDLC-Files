@@ -1,35 +1,27 @@
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import json
-from datetime import datetime
 
 from config import ADMIN_ID, VERSION, BOT_NAME, TRIAL_DAYS, VIP_PLANS
 from db.database import (
     register_user, get_user, get_user_stats, get_user_settings,
     update_user_settings, get_all_users_count, search_messages,
     export_user_messages, clean_old_messages,
-    get_subscription, grant_days, start_trial, has_access
+    get_subscription, grant_days, start_trial
 )
 
 router = Router()
 
 
 def is_private(message: Message) -> bool:
-    """Команды только в личке с ботом — не в чужих чатах через business."""
+    """Проверка: диалог напрямую с ботом (не business)."""
     return message.chat.type == "private" and not getattr(message, "business_connection_id", None)
 
 
-async def reply(message: Message, text: str, reply_markup=None, parse_mode="HTML"):
-    """Ответ только в этот чат (личка с ботом). Редактирует если можно."""
-    if not is_private(message):
-        # На всякий случай — если пришло из business, шлём только владельцу в ЛС
-        try:
-            await message.bot.send_message(message.from_user.id, text, reply_markup=reply_markup, parse_mode=parse_mode)
-        except Exception:
-            pass
-        return
+async def safe_reply(message: Message, text: str, reply_markup=None, parse_mode="HTML"):
+    """Универсальная отправка/редактирование сообщений в любом контексте."""
     try:
         await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
         return
@@ -134,12 +126,10 @@ async def cmd_start(message: Message):
             f"Ловлю удалённые сообщения, правки и protected медиа.\n\n"
             f"🎁 Нажми кнопку ниже, чтобы активировать <b>пробный период {TRIAL_DAYS} дня</b>."
         )
-        await reply(message, text, reply_markup=menu_kb(user.id, False, False))
+        await safe_reply(message, text, reply_markup=menu_kb(user.id, False, False))
         return
 
-    status = ""
-    if sub["active"]:
-        status = f"\n💎 VIP до <b>{sub['until'][:10]}</b>\n"
+    status = f"\n💎 VIP до <b>{sub['until'][:10]}</b>\n" if sub["active"] else ""
 
     text = (
         f"👋 Привет, {user.first_name}!\n\n"
@@ -147,24 +137,122 @@ async def cmd_start(message: Message):
         f"Подключение: Настройки → Автоматизация чатов → добавь бота\n\n"
         f"<code>.help</code> · <code>.shop</code>"
     )
-    await reply(message, text, reply_markup=menu_kb(user.id, sub["active"], sub["trial_used"]))
+    await safe_reply(message, text, reply_markup=menu_kb(user.id, sub["active"], sub["trial_used"]))
 
 
 @router.message(F.text.lower().in_({".help", ".помощь"}))
+@router.business_message(F.text.lower().in_({".help", ".помощь"}))
 async def cmd_help(message: Message):
-    if not is_private(message):
-        return
-    await reply(message, HELP_TEXT)
+    sub = await get_subscription(message.from_user.id)
+    kb = menu_kb(message.from_user.id, sub["active"], sub["trial_used"])
+    await safe_reply(message, HELP_TEXT, reply_markup=kb)
 
 
 @router.message(F.text.lower().in_({".shop", ".vip", ".магазин"}))
+@router.business_message(F.text.lower().in_({".shop", ".vip", ".магазин"}))
 async def cmd_shop(message: Message):
-    if not is_private(message):
-        return
     sub = await get_subscription(message.from_user.id)
     status = f"✅ VIP до <b>{sub['until'][:10]}</b>\n\n" if sub["active"] else "❌ Подписка не активна\n\n"
-    await reply(message, f"💎 <b>Магазин VIP</b>\n\n{status}Выбери тариф:", reply_markup=shop_kb())
+    await safe_reply(message, f"💎 <b>Магазин VIP</b>\n\n{status}Выбери тариф:", reply_markup=shop_kb())
 
+
+@router.message(F.text.lower().in_({".stats", ".стата"}))
+@router.business_message(F.text.lower().in_({".stats", ".стата"}))
+async def cmd_stats(message: Message):
+    stats = await get_user_stats(message.from_user.id)
+    sub = await get_subscription(message.from_user.id)
+    if not stats:
+        await safe_reply(message, "Пока нет данных.")
+        return
+    vip = f"\n💎 VIP до {sub['until'][:10]}" if sub["active"] else ""
+    await safe_reply(message, f"📊 Сохранено: <b>{stats['total_saved']}</b>\n🗑 Удалений: <b>{stats['total_deleted']}</b>\n✏️ Правок: <b>{stats['total_edited']}</b>{vip}")
+
+
+@router.message(F.text.lower().in_({".settings", ".настройки"}))
+@router.business_message(F.text.lower().in_({".settings", ".настройки"}))
+async def cmd_settings(message: Message):
+    s = await get_user_settings(message.from_user.id)
+    await safe_reply(message, "⚙️ Настройки", reply_markup=settings_kb(s))
+
+
+@router.message(F.text.lower().in_({".profile", ".я", ".me"}))
+@router.business_message(F.text.lower().in_({".profile", ".я", ".me"}))
+async def cmd_profile(message: Message):
+    user = await get_user(message.from_user.id)
+    sub = await get_subscription(message.from_user.id)
+    if not user:
+        await safe_reply(message, "Сначала /start в ЛС с ботом")
+        return
+    vip = f"до {sub['until'][:10]}" if sub["active"] else "нет"
+    await safe_reply(message, f"👤 {user['full_name']}\nID: <code>{user['user_id']}</code>\nVIP: {vip}\nСообщений: {user['messages_saved']}")
+
+
+@router.message(F.text.lower() == ".id")
+@router.business_message(F.text.lower() == ".id")
+async def cmd_id(message: Message):
+    await safe_reply(message, f"<code>{message.from_user.id}</code>")
+
+
+@router.message(F.text.lower() == ".ping")
+@router.business_message(F.text.lower() == ".ping")
+async def cmd_ping(message: Message):
+    await safe_reply(message, "🏓 Pong")
+
+
+@router.message(F.text.lower() == ".about")
+@router.business_message(F.text.lower() == ".about")
+async def cmd_about(message: Message):
+    await safe_reply(message, f"<b>{BOT_NAME}</b> v{VERSION}\nСохранение удалённых сообщений через Автоматизацию.")
+
+
+@router.message(F.text.lower().startswith(".search"))
+@router.business_message(F.text.lower().startswith(".search"))
+async def cmd_search(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await safe_reply(message, "Использование: <code>.search текст</code>")
+        return
+    results = await search_messages(message.from_user.id, parts[1].strip(), 10)
+    if not results:
+        await safe_reply(message, "Пусто")
+        return
+    lines = [f"🔍 Найдено {len(results)}:\n"] + [f"• {(r['text'] or r['content_type'] or '')[:70]}" for r in results]
+    await safe_reply(message, "\n".join(lines))
+
+
+@router.message(F.text.lower() == ".export")
+@router.business_message(F.text.lower() == ".export")
+async def cmd_export(message: Message):
+    data = await export_user_messages(message.from_user.id, 200)
+    if not data:
+        await safe_reply(message, "Нечего экспортировать")
+        return
+    path = f"media/export_{message.from_user.id}.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    from aiogram.types import FSInputFile
+    await message.answer_document(FSInputFile(path), caption="📦 Экспорт")
+
+
+@router.message(F.text.lower() == ".last")
+@router.business_message(F.text.lower() == ".last")
+async def cmd_last(message: Message):
+    data = await export_user_messages(message.from_user.id, 5)
+    if not data:
+        await safe_reply(message, "Пусто")
+        return
+    lines = ["🕒 Последние сообщения:\n"] + [f"• {r['from_name']}: {(r['text'] or '')[:50]}" for r in data]
+    await safe_reply(message, "\n".join(lines))
+
+
+@router.message(F.text.lower() == ".media")
+@router.business_message(F.text.lower() == ".media")
+async def cmd_media(message: Message):
+    stats = await get_user_stats(message.from_user.id)
+    await safe_reply(message, f"🖼 Сохранено медиа: <b>{stats['media_saved'] if stats else 0}</b>")
+
+
+# ===== CALLBACK HANDLERS =====
 
 @router.callback_query(F.data == "trial")
 async def cb_trial(c: CallbackQuery):
@@ -227,150 +315,46 @@ async def success_pay(message: Message):
             await message.answer(f"✅ VIP на {plan['days']} дн. до <code>{until[:16]}</code>", parse_mode="HTML")
 
 
-@router.message(F.text.lower().in_({".stats", ".стата"}))
-async def cmd_stats(message: Message):
-    if not is_private(message):
-        return
-    stats = await get_user_stats(message.from_user.id)
-    sub = await get_subscription(message.from_user.id)
-    if not stats:
-        await reply(message, "Пока нет данных.")
-        return
-    vip = f"\n💎 VIP до {sub['until'][:10]}" if sub["active"] else ""
-    await reply(message, f"📊 Сохранено: <b>{stats['total_saved']}</b>\n🗑 Удалений: <b>{stats['total_deleted']}</b>\n✏️ Правок: <b>{stats['total_edited']}</b>{vip}")
-
-
-@router.message(F.text.lower().in_({".settings", ".настройки"}))
-async def cmd_settings(message: Message):
-    if not is_private(message):
-        return
-    s = await get_user_settings(message.from_user.id)
-    await reply(message, "⚙️ Настройки", reply_markup=settings_kb(s))
-
-
-@router.message(F.text.lower().in_({".profile", ".я", ".me"}))
-async def cmd_profile(message: Message):
-    if not is_private(message):
-        return
-    user = await get_user(message.from_user.id)
-    sub = await get_subscription(message.from_user.id)
-    if not user:
-        await reply(message, "Сначала /start")
-        return
-    vip = f"до {sub['until'][:10]}" if sub["active"] else "нет"
-    await reply(message, f"👤 {user['full_name']}\nID: <code>{user['user_id']}</code>\nVIP: {vip}\nСообщений: {user['messages_saved']}")
-
-
-@router.message(F.text.lower() == ".id")
-async def cmd_id(message: Message):
-    if not is_private(message):
-        return
-    await reply(message, f"<code>{message.from_user.id}</code>")
-
-
-@router.message(F.text.lower() == ".ping")
-async def cmd_ping(message: Message):
-    if not is_private(message):
-        return
-    await reply(message, "🏓 Pong")
-
-
-@router.message(F.text.lower() == ".about")
-async def cmd_about(message: Message):
-    if not is_private(message):
-        return
-    await reply(message, f"<b>{BOT_NAME}</b> v{VERSION}\nСохранение удалённых сообщений через Автоматизацию.")
-
-
-@router.message(F.text.lower().startswith(".search"))
-async def cmd_search(message: Message):
-    if not is_private(message):
-        return
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2:
-        await reply(message, "`.search текст`")
-        return
-    results = await search_messages(message.from_user.id, parts[1].strip(), 10)
-    if not results:
-        await reply(message, "Пусто")
-        return
-    lines = [f"🔍 {len(results)}:\n"] + [f"• {(r['text'] or r['content_type'] or '')[:70]}" for r in results]
-    await reply(message, "\n".join(lines))
-
-
-@router.message(F.text.lower() == ".export")
-async def cmd_export(message: Message):
-    if not is_private(message):
-        return
-    data = await export_user_messages(message.from_user.id, 200)
-    if not data:
-        await reply(message, "Нечего экспортировать")
-        return
-    path = f"media/export_{message.from_user.id}.json"
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    from aiogram.types import FSInputFile
-    await message.answer_document(FSInputFile(path), caption="📦 Экспорт")
-
-
-@router.message(F.text.lower() == ".last")
-async def cmd_last(message: Message):
-    if not is_private(message):
-        return
-    data = await export_user_messages(message.from_user.id, 5)
-    if not data:
-        await reply(message, "Пусто")
-        return
-    lines = ["🕒\n"] + [f"• {r['from_name']}: {(r['text'] or '')[:50]}" for r in data]
-    await reply(message, "\n".join(lines))
-
-
-@router.message(F.text.lower() == ".media")
-async def cmd_media(message: Message):
-    if not is_private(message):
-        return
-    stats = await get_user_stats(message.from_user.id)
-    await reply(message, f"🖼 {stats['media_saved'] if stats else 0}")
-
-
 # ===== ADMIN =====
 @router.message(F.text.lower() == ".admin")
+@router.business_message(F.text.lower() == ".admin")
 async def cmd_admin(message: Message):
-    if message.from_user.id != ADMIN_ID or not is_private(message):
+    if message.from_user.id != ADMIN_ID:
         return
     count = await get_all_users_count()
-    await reply(message, f"🛠 <b>Админ</b>\nПользователей: <b>{count}</b>\n<code>.give ID дней</code>", reply_markup=admin_kb())
+    await safe_reply(message, f"🛠 <b>Админ</b>\nПользователей: <b>{count}</b>\n<code>.give ID дней</code>", reply_markup=admin_kb())
 
 
 @router.message(F.text.lower().startswith(".give"))
+@router.business_message(F.text.lower().startswith(".give"))
 async def cmd_give(message: Message):
-    if message.from_user.id != ADMIN_ID or not is_private(message):
+    if message.from_user.id != ADMIN_ID:
         return
     parts = (message.text or "").split()
     if len(parts) < 3:
-        await reply(message, "`.give USER_ID дней`")
+        await safe_reply(message, "Использование: <code>.give USER_ID дней</code>")
         return
     try:
         uid, days = int(parts[1]), int(parts[2])
     except ValueError:
-        await reply(message, "Числа!")
+        await safe_reply(message, "Укажите числа!")
         return
     until = await grant_days(uid, days, True)
-    # Только админу в ЛС
-    await reply(message, f"✅ Выдано {days} дн. → <code>{uid}</code>\nДо: {until[:16]}")
+    await safe_reply(message, f"✅ Выдано {days} дн. → <code>{uid}</code>\nДо: {until[:16]}")
 
 
 @router.message(F.text.lower() == ".users")
+@router.business_message(F.text.lower() == ".users")
 async def cmd_users(message: Message):
-    if message.from_user.id != ADMIN_ID or not is_private(message):
+    if message.from_user.id != ADMIN_ID:
         return
-    await reply(message, f"👥 {await get_all_users_count()}")
+    await safe_reply(message, f"👥 Пользователей: {await get_all_users_count()}")
 
 
 @router.callback_query(F.data == "admin_panel")
 async def cb_admin(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
-        await c.answer("Нет", show_alert=True)
+        await c.answer("Нет доступа", show_alert=True)
         return
     count = await get_all_users_count()
     await c.message.edit_text(f"🛠 <b>Админ</b>\nЮзеров: <b>{count}</b>", reply_markup=admin_kb(), parse_mode="HTML")
@@ -381,12 +365,11 @@ async def cb_admin(c: CallbackQuery):
 async def cb_admin_users(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
         return
-    # Простой список через export
     import aiosqlite
     from config import DB_PATH
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT user_id, username, full_name, subscription_until, is_vip FROM users ORDER BY joined_at DESC LIMIT 30") as cur:
+        async with db.execute("SELECT user_id, username, full_name, is_vip FROM users ORDER BY joined_at DESC LIMIT 30") as cur:
             rows = await cur.fetchall()
     lines = ["👥 <b>Пользователи</b> (до 30):\n"]
     for r in rows:
@@ -407,31 +390,6 @@ async def cb_admin_stats(c: CallbackQuery):
     await c.answer()
 
 
-@router.callback_query(F.data == "admin_logs")
-async def cb_admin_logs(c: CallbackQuery):
-    if c.from_user.id != ADMIN_ID:
-        return
-    data = await export_user_messages(ADMIN_ID, 10)
-    if not data:
-        # любые последние из базы
-        import aiosqlite
-        from config import DB_PATH
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT user_id, from_name, content_type, text, created_at FROM messages ORDER BY created_at DESC LIMIT 15") as cur:
-                rows = await cur.fetchall()
-        lines = ["📜 Последние сообщения в системе:\n"]
-        for r in rows:
-            lines.append(f"<code>{r['user_id']}</code> {r['from_name']}: {(r['text'] or r['content_type'])[:40]}")
-        text = "\n".join(lines)[:3500]
-    else:
-        text = "📜 Твои последние записи в системе."
-    b = InlineKeyboardBuilder()
-    b.button(text="◀️ Назад", callback_data="admin_panel")
-    await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
-    await c.answer()
-
-
 @router.callback_query(F.data == "admin_clean")
 async def cb_admin_clean(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
@@ -447,7 +405,9 @@ async def cb_stats(c: CallbackQuery):
 
 @router.callback_query(F.data == "help")
 async def cb_help(c: CallbackQuery):
-    await c.message.edit_text(HELP_TEXT, parse_mode="HTML")
+    sub = await get_subscription(c.from_user.id)
+    kb = menu_kb(c.from_user.id, sub["active"], sub["trial_used"])
+    await c.message.edit_text(HELP_TEXT, reply_markup=kb, parse_mode="HTML")
     await c.answer()
 
 @router.callback_query(F.data == "profile")
@@ -458,13 +418,13 @@ async def cb_profile(c: CallbackQuery):
 @router.callback_query(F.data == "settings")
 async def cb_settings(c: CallbackQuery):
     s = await get_user_settings(c.from_user.id)
-    await c.message.edit_text("⚙️", reply_markup=settings_kb(s))
+    await c.message.edit_text("⚙️ Настройки:", reply_markup=settings_kb(s))
     await c.answer()
 
 @router.callback_query(F.data == "back_main")
 async def cb_back(c: CallbackQuery):
     sub = await get_subscription(c.from_user.id)
-    await c.message.edit_text("Меню:", reply_markup=menu_kb(c.from_user.id, sub["active"], sub["trial_used"]))
+    await c.message.edit_text("Главное меню:", reply_markup=menu_kb(c.from_user.id, sub["active"], sub["trial_used"]))
     await c.answer()
 
 @router.callback_query(F.data.startswith("tog_"))
@@ -477,15 +437,3 @@ async def cb_tog(c: CallbackQuery):
         await update_user_settings(c.from_user.id, s)
     await c.message.edit_reply_markup(reply_markup=settings_kb(s))
     await c.answer("OK")
-
-@router.callback_query(F.data == "games")
-async def cb_games(c: CallbackQuery):
-    b = InlineKeyboardBuilder()
-    b.button(text="🎯 Угадай число", callback_data="game_guess")
-    b.button(text="✂️ КНБ", callback_data="game_rps")
-    b.button(text="🎰 Слоты", callback_data="game_slot")
-    b.button(text="❌⭕ Крестики", callback_data="game_ttt")
-    b.button(text="◀️ Назад", callback_data="back_main")
-    b.adjust(2)
-    await c.message.edit_text("🎮 <b>Игры</b>", reply_markup=b.as_markup(), parse_mode="HTML")
-    await c.answer()
