@@ -12,6 +12,10 @@ from config import CMD_PREFIX
 
 router = Router()
 
+def is_priv(message: Message) -> bool:
+    return message.chat.type == "private" and not getattr(message, "business_connection_id", None)
+
+
 # Список известных команд — чтобы catch-all их не перехватывал
 KNOWN = {
     "help", "помощь", "stats", "стата", "stat", "settings", "настройки", "set",
@@ -373,7 +377,7 @@ async def cmd_shrug(message: Message):
 @router.message(F.text.lower() == ".lenny")
 @router.business_message(F.text.lower() == ".lenny")
 async def cmd_lenny(message: Message):
-    await safe_edit(message, "( ͡° ͜ʖ ͡°)", parse_mode=None)
+    await safe_edit(message, "( ͡° 倾 ͡°)", parse_mode=None)
 
 @router.message(F.text.lower() == ".magic")
 @router.business_message(F.text.lower() == ".magic")
@@ -471,4 +475,4 @@ async def unknown_dot(message: Message):
     await safe_edit(
         message,
         f"Команда <code>.{html.escape(name)}</code> не найдена.\nНапиши <code>.help</code>"
-                   )
+    )
