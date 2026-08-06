@@ -20,40 +20,41 @@ def is_private(message: Message) -> bool:
     return message.chat.type == "private" and not getattr(message, "business_connection_id", None)
 
 
-async def send_or_replace(message: Message, text: str, reply_markup=None):
+async def send_clean_reply(message: Message, text: str, reply_markup=None):
     """
-    Удаляет входящее командное сообщение (например, .admin в бизнесе) 
-    и отправляет чистое новое сообщение от бота.
+    Безопасная отправка: если сообщение из Telegram Business, 
+    пытаемся удалить входящую команду, чтобы собеседник её не видел.
     """
-    try:
-        await message.delete()
-    except Exception:
-        pass
+    if getattr(message, "business_connection_id", None):
+        try:
+            await message.delete()
+        except Exception:
+            pass
     return await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
 
 
-# ===== КЛАВИАТУРЫ С ПРИВЯЗКОЙ К USER_ID =====
+# ===== КЛАВИАТУРЫ =====
 
-def start_kb(user_id: int):
+def start_trial_kb(user_id: int):
+    """Клавиатура ТОЛЬКО для первого старта (Пробный период)."""
     b = InlineKeyboardBuilder()
     b.button(text="🎁 Активировать пробный период (3 дня)", callback_data=f"trial:{user_id}")
     return b.as_markup()
 
 
-def menu_kb(owner_id: int, has_sub: bool, trial_used: bool):
+def menu_kb(user_id: int):
+    """Главное меню без каких-либо триалов. Кнопка Админа — СТРОГО для ADMIN_ID."""
     b = InlineKeyboardBuilder()
-    if not has_sub and not trial_used:
-        b.button(text="🎁 Активировать пробный период (3 дня)", callback_data=f"trial:{owner_id}")
-        b.adjust(1)
-        return b.as_markup()
-
-    b.button(text="📊 Статистика", callback_data=f"stats:{owner_id}")
-    b.button(text="⚙️ Настройки", callback_data=f"settings:{owner_id}")
-    b.button(text="📜 Команды", callback_data=f"help:{owner_id}")
-    b.button(text="👤 Профиль", callback_data=f"profile:{owner_id}")
-    b.button(text="💎 VIP / Магазин", callback_data=f"shop:{owner_id}")
-    if owner_id == ADMIN_ID:
-        b.button(text="🛠 Админ", callback_data=f"admin_panel:{owner_id}")
+    b.button(text="📊 Статистика", callback_data=f"stats:{user_id}")
+    b.button(text="⚙️ Настройки", callback_data=f"settings:{user_id}")
+    b.button(text="📜 Команды", callback_data=f"help:{user_id}")
+    b.button(text="👤 Профиль", callback_data=f"profile:{user_id}")
+    b.button(text="💎 VIP / Магазин", callback_data=f"shop:{user_id}")
+    
+    # Кнопка админа выводится ИСКЛЮЧИТЕЛЬНО если user_id равен ADMIN_ID
+    if int(user_id) == int(ADMIN_ID):
+        b.button(text="🛠 Админ", callback_data=f"admin_panel:{user_id}")
+        
     b.adjust(2)
     return b.as_markup()
 
@@ -93,15 +94,18 @@ def admin_kb(owner_id: int):
     return b.as_markup()
 
 
-# ===== ПРОВЕРКА ЧУЖИХ КНОПОК =====
+# ===== ЗАЩИТА НАЖАТИЯ КНОПОК =====
 
 async def check_ownership(c: CallbackQuery) -> bool:
-    """Проверяет, совпадает ли ID нажавшего с владельцем меню в callback_data."""
+    """Запрещает чужим людям нажимать на кнопки в твоём меню."""
     if ":" in c.data:
-        owner_id = int(c.data.split(":")[-1])
-        if c.from_user.id != owner_id:
-            await c.answer("⛔ Это не твое меню! Вызови свое командой .help", show_alert=True)
-            return False
+        try:
+            owner_id = int(c.data.split(":")[-1])
+            if c.from_user.id != owner_id:
+                await c.answer("⛔ Это не твоё меню!", show_alert=True)
+                return False
+        except ValueError:
+            pass
     return True
 
 
@@ -126,10 +130,10 @@ HELP_TEXT = f"""✨ <b>—={BOT_NAME} v{VERSION}=-</b> ✨
 ├ <code>.upper [текст]</code> — СДЕЛАТЬ ВЕРХНИЙ РЕГИСТР
 └ <code>.lower [текст]</code> — сделать нижний регистр
 ───────────────────────────
-💡 <i>Все команды можно писать прямо в чатах с друзьями!</i>"""
+💡 <i>Все команды можно писать прямо в чатах!</i>"""
 
 
-# ===== КОМАНДЫ =====
+# ===== ХЕНДЛЕРЫ КОМАНД =====
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
@@ -139,6 +143,7 @@ async def cmd_start(message: Message):
     await register_user(user.id, user.username or "", user.full_name or "")
     sub = await get_subscription(user.id)
 
+    # Показываем кнопку ТРИАЛА только если он еще НЕ использован и подписка НЕ активна
     if not sub["active"] and not sub["trial_used"]:
         text = (
             f"⚡ <b>Приветствуем в {BOT_NAME}!</b> <code>v{VERSION}</code>\n"
@@ -147,7 +152,7 @@ async def cmd_start(message: Message):
             f"все <b>удалённые сообщения и медиа-файлы</b>!\n\n"
             f"👇 Жми кнопку ниже, чтобы попробовать <b>3 дня бесплатно</b>:"
         )
-        await send_or_replace(message, text, reply_markup=start_kb(user.id))
+        await send_clean_reply(message, text, reply_markup=start_trial_kb(user.id))
         return
 
     text = (
@@ -156,21 +161,20 @@ async def cmd_start(message: Message):
         f"👤 Пользователь: <b>{user.full_name}</b>\n"
         f"📌 Быстрые команды: <code>.help</code> · <code>.stats</code> · <code>.shop</code>"
     )
-    await send_or_replace(message, text, reply_markup=menu_kb(user.id, sub["active"], sub["trial_used"]))
+    await send_clean_reply(message, text, reply_markup=menu_kb(user.id))
 
 
 @router.message(F.text.lower().in_({".help", ".помощь"}))
 @router.business_message(F.text.lower().in_({".help", ".помощь"}))
 async def cmd_help(message: Message):
-    sub = await get_subscription(message.from_user.id)
-    kb = menu_kb(message.from_user.id, sub["active"], sub["trial_used"])
-    await send_or_replace(message, HELP_TEXT, reply_markup=kb)
+    await send_clean_reply(message, HELP_TEXT, reply_markup=menu_kb(message.from_user.id))
 
 
 @router.message(F.text.lower() == ".admin")
 @router.business_message(F.text.lower() == ".admin")
 async def cmd_admin(message: Message):
-    if message.from_user.id != ADMIN_ID:
+    # Строжайшая проверка на админа
+    if int(message.from_user.id) != int(ADMIN_ID):
         return
     count = await get_all_users_count()
     text = (
@@ -178,7 +182,7 @@ async def cmd_admin(message: Message):
         f"Пользователей: <b>{count}</b>\n"
         f"Выдача VIP: <code>.give ID дней</code>"
     )
-    await send_or_replace(message, text, reply_markup=admin_kb(message.from_user.id))
+    await send_clean_reply(message, text, reply_markup=admin_kb(message.from_user.id))
 
 
 @router.message(F.text.lower().in_({".shop", ".vip", ".магазин"}))
@@ -187,7 +191,7 @@ async def cmd_shop(message: Message):
     uid = message.from_user.id
     sub = await get_subscription(uid)
     status = f"✅ VIP активен до: <b>{sub['until'][:10]}</b>\n\n" if sub["active"] else "❌ VIP-подписка не активна\n\n"
-    await send_or_replace(message, f"💎 <b>Магазин VIP-подписок</b>\n\n{status}Выберите подписку:", reply_markup=shop_kb(uid))
+    await send_clean_reply(message, f"💎 <b>Магазин VIP-подписок</b>\n\n{status}Выберите подписку:", reply_markup=shop_kb(uid))
 
 
 @router.message(F.text.lower().in_({".stats", ".стата"}))
@@ -197,7 +201,7 @@ async def cmd_stats(message: Message):
     stats = await get_user_stats(uid)
     sub = await get_subscription(uid)
     if not stats:
-        await send_or_replace(message, "Пока нет данных для статистики.")
+        await send_clean_reply(message, "Пока нет данных для статистики.")
         return
     vip = f"\n💎 VIP активен до {sub['until'][:10]}" if sub["active"] else ""
     text = (
@@ -206,7 +210,7 @@ async def cmd_stats(message: Message):
         f"🗑 Перехвачено удалений: <b>{stats['total_deleted']}</b>\n"
         f"✏️ Перехвачено правок: <b>{stats['total_edited']}</b>{vip}"
     )
-    await send_or_replace(message, text, reply_markup=menu_kb(uid, sub["active"], sub["trial_used"]))
+    await send_clean_reply(message, text, reply_markup=menu_kb(uid))
 
 
 @router.message(F.text.lower().in_({".settings", ".настройки"}))
@@ -214,10 +218,10 @@ async def cmd_stats(message: Message):
 async def cmd_settings(message: Message):
     uid = message.from_user.id
     s = await get_user_settings(uid)
-    await send_or_replace(message, "⚙️ <b>Настройки перехвата:</b>", reply_markup=settings_kb(uid, s))
+    await send_clean_reply(message, "⚙️ <b>Настройки перехвата:</b>", reply_markup=settings_kb(uid, s))
 
 
-# ===== CALLBACK HANDLERS С ПРОВЕРКОЙ =====
+# ===== CALLBACK HANDLERS =====
 
 @router.callback_query(F.data.startswith("trial:"))
 async def cb_trial(c: CallbackQuery):
@@ -236,7 +240,7 @@ async def cb_trial(c: CallbackQuery):
             f"4️⃣ Нажмите <b>Добавить бота</b> и укажите юзернейм нашего бота.\n\n"
             f"🚀 <i>Готово! Теперь бот автоматически сохраняет удаленные сообщения.</i>"
         )
-        await c.message.edit_text(instruction_text, reply_markup=menu_kb(uid, True, True), parse_mode="HTML")
+        await c.message.edit_text(instruction_text, reply_markup=menu_kb(uid), parse_mode="HTML")
     else:
         await c.answer("Пробный период уже был использован!", show_alert=True)
     await c.answer()
@@ -245,8 +249,8 @@ async def cb_trial(c: CallbackQuery):
 @router.callback_query(F.data.startswith("admin_panel:"))
 async def cb_admin(c: CallbackQuery):
     if not await check_ownership(c): return
-    if c.from_user.id != ADMIN_ID:
-        await c.answer("Доступ запрещен", show_alert=True)
+    if int(c.from_user.id) != int(ADMIN_ID):
+        await c.answer("⛔ Доступ запрещен!", show_alert=True)
         return
     count = await get_all_users_count()
     await c.message.edit_text(f"🛠 <b>Админ панель</b>\nПользователей: <b>{count}</b>", reply_markup=admin_kb(c.from_user.id), parse_mode="HTML")
@@ -256,7 +260,7 @@ async def cb_admin(c: CallbackQuery):
 @router.callback_query(F.data.startswith("admin_users:"))
 async def cb_admin_users(c: CallbackQuery):
     if not await check_ownership(c): return
-    if c.from_user.id != ADMIN_ID: return
+    if int(c.from_user.id) != int(ADMIN_ID): return
     import aiosqlite
     from config import DB_PATH
     async with aiosqlite.connect(DB_PATH) as db:
@@ -277,8 +281,7 @@ async def cb_admin_users(c: CallbackQuery):
 async def cb_back(c: CallbackQuery):
     if not await check_ownership(c): return
     uid = c.from_user.id
-    sub = await get_subscription(uid)
-    await c.message.edit_text("⚡ <b>Главное меню:</b>", reply_markup=menu_kb(uid, sub["active"], sub["trial_used"]), parse_mode="HTML")
+    await c.message.edit_text("⚡ <b>Главное меню:</b>", reply_markup=menu_kb(uid), parse_mode="HTML")
     await c.answer()
 
 
