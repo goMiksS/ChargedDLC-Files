@@ -1,6 +1,7 @@
 import json
+import random
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -14,36 +15,20 @@ from db.database import (
 
 router = Router()
 
-
-def is_private(message: Message) -> bool:
-    """Проверка: диалог напрямую с ботом (не business)."""
-    return message.chat.type == "private" and not getattr(message, "business_connection_id", None)
-
-
-async def send_clean_reply(message: Message, text: str, reply_markup=None):
-    """
-    Безопасная отправка: если сообщение из Telegram Business, 
-    пытаемся удалить входящую команду, чтобы собеседник её не видел.
-    """
-    if getattr(message, "business_connection_id", None):
-        try:
-            await message.delete()
-        except Exception:
-            pass
-    return await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
-
+async def savemod_edit_or_reply(message: Message, text: str, reply_markup=None):
+    try:
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
 
 # ===== КЛАВИАТУРЫ =====
 
 def start_trial_kb(user_id: int):
-    """Клавиатура ТОЛЬКО для первого старта (Пробный период)."""
     b = InlineKeyboardBuilder()
     b.button(text="🎁 Активировать пробный период (3 дня)", callback_data=f"trial:{user_id}")
     return b.as_markup()
 
-
 def menu_kb(user_id: int):
-    """Главное меню без каких-либо триалов. Кнопка Админа — СТРОГО для ADMIN_ID."""
     b = InlineKeyboardBuilder()
     b.button(text="📊 Статистика", callback_data=f"stats:{user_id}")
     b.button(text="⚙️ Настройки", callback_data=f"settings:{user_id}")
@@ -51,13 +36,11 @@ def menu_kb(user_id: int):
     b.button(text="👤 Профиль", callback_data=f"profile:{user_id}")
     b.button(text="💎 VIP / Магазин", callback_data=f"shop:{user_id}")
     
-    # Кнопка админа выводится ИСКЛЮЧИТЕЛЬНО если user_id равен ADMIN_ID
     if int(user_id) == int(ADMIN_ID):
         b.button(text="🛠 Админ", callback_data=f"admin_panel:{user_id}")
         
     b.adjust(2)
     return b.as_markup()
-
 
 def settings_kb(owner_id: int, settings: dict):
     b = InlineKeyboardBuilder()
@@ -74,7 +57,6 @@ def settings_kb(owner_id: int, settings: dict):
     b.adjust(1)
     return b.as_markup()
 
-
 def shop_kb(owner_id: int):
     b = InlineKeyboardBuilder()
     for key, plan in VIP_PLANS.items():
@@ -82,7 +64,6 @@ def shop_kb(owner_id: int):
     b.button(text="◀️ Назад в меню", callback_data=f"back_main:{owner_id}")
     b.adjust(1)
     return b.as_markup()
-
 
 def admin_kb(owner_id: int):
     b = InlineKeyboardBuilder()
@@ -93,106 +74,52 @@ def admin_kb(owner_id: int):
     b.adjust(1)
     return b.as_markup()
 
-
-# ===== ЗАЩИТА НАЖАТИЯ КНОПОК =====
-
-async def check_ownership(c: CallbackQuery) -> bool:
-    """Запрещает чужим людям нажимать на кнопки в твоём меню."""
-    if ":" in c.data:
-        try:
-            owner_id = int(c.data.split(":")[-1])
-            if c.from_user.id != owner_id:
-                await c.answer("⛔ Это не твоё меню!", show_alert=True)
-                return False
-        except ValueError:
-            pass
-    return True
-
-
-HELP_TEXT = f"""✨ <b>—={BOT_NAME} v{VERSION}=-</b> ✨
-───────────────────────────
-🛠 <b>ОСНОВНЫЕ КОМАНДЫ</b>
-├ <code>.help</code> — Вызов этого меню
-├ <code>.stats</code> — Ваша статистика
-├ <code>.profile</code> — Данные профиля
-├ <code>.settings</code> — Настройки сохранения
-└ <code>.shop</code> / <code>.vip</code> — Купить VIP-доступ
-
-📂 <b>УПРАВЛЕНИЕ СООБЩЕНИЯМИ</b>
-├ <code>.search [текст]</code> — Поиск по сохраненным
-├ <code>.last</code> — Показать последние логи
-├ <code>.media</code> — Статистика по сохранённым медиа
-└ <code>.export</code> — Скачать логи файлом .json
-
-🔤 <b>ТЕКСТОВЫЕ УТИЛИТЫ</b>
-├ <code>.sw [текст]</code> — Исправить раскладку
-├ <code>.reverse [текст]</code> — Перевернуть текст
-├ <code>.upper [текст]</code> — СДЕЛАТЬ ВЕРХНИЙ РЕГИСТР
-└ <code>.lower [текст]</code> — сделать нижний регистр
-───────────────────────────
-💡 <i>Все команды можно писать прямо в чатах!</i>"""
-
-
-# ===== ХЕНДЛЕРЫ КОМАНД =====
+# ===== ЛОГИКА СИСТЕМНЫХ И ТЕКСТОВЫХ КОМАНД =====
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    if not is_private(message):
+    if getattr(message, "business_connection_id", None):
         return
     user = message.from_user
     await register_user(user.id, user.username or "", user.full_name or "")
     sub = await get_subscription(user.id)
 
-    # Показываем кнопку ТРИАЛА только если он еще НЕ использован и подписка НЕ активна
     if not sub["active"] and not sub["trial_used"]:
-        text = (
-            f"⚡ <b>Приветствуем в {BOT_NAME}!</b> <code>v{VERSION}</code>\n"
-            f"───────────────────────────\n"
-            f"Модификация <b>{BOT_NAME}</b> позволяет отслеживать и сохранять "
-            f"все <b>удалённые сообщения и медиа-файлы</b>!\n\n"
-            f"👇 Жми кнопку ниже, чтобы попробовать <b>3 дня бесплатно</b>:"
-        )
-        await send_clean_reply(message, text, reply_markup=start_trial_kb(user.id))
+        text = f"⚡ <b>Приветствуем в {BOT_NAME}!</b>\nЖми кнопку ниже, чтобы активировать тест:"
+        await message.answer(text, reply_markup=start_trial_kb(user.id), parse_mode="HTML")
         return
 
-    text = (
-        f"⚡ <b>Панель управления {BOT_NAME}</b> <code>v{VERSION}</code>\n"
-        f"───────────────────────────\n"
-        f"👤 Пользователь: <b>{user.full_name}</b>\n"
-        f"📌 Быстрые команды: <code>.help</code> · <code>.stats</code> · <code>.shop</code>"
-    )
-    await send_clean_reply(message, text, reply_markup=menu_kb(user.id))
-
+    text = f"⚡ <b>Панель {BOT_NAME} v{VERSION}</b>\nПользователь: <b>{user.full_name}</b>"
+    await message.answer(text, reply_markup=menu_kb(user.id), parse_mode="HTML")
 
 @router.message(F.text.lower().in_({".help", ".помощь"}))
 @router.business_message(F.text.lower().in_({".help", ".помощь"}))
 async def cmd_help(message: Message):
-    await send_clean_reply(message, HELP_TEXT, reply_markup=menu_kb(message.from_user.id))
-
-
-@router.message(F.text.lower() == ".admin")
-@router.business_message(F.text.lower() == ".admin")
-async def cmd_admin(message: Message):
-    # Строжайшая проверка на админа
-    if int(message.from_user.id) != int(ADMIN_ID):
-        return
-    count = await get_all_users_count()
     text = (
-        f"🛠 <b>Панель Администратора</b>\n\n"
-        f"Пользователей: <b>{count}</b>\n"
-        f"Выдача VIP: <code>.give ID дней</code>"
+        f"✨ <b>—={BOT_NAME} v{VERSION}=-</b> ✨\n"
+        f"───────────────────────────\n"
+        f"🛠 <b>ОСНОВНЫЕ:</b> <code>.stats</code> · <code>.profile</code> · <code>.settings</code> · <code>.shop</code> · <code>.ping</code> · <code>.id</code>\n\n"
+        f"📂 <b>ЛОГИ:</b> <code>.search [текст]</code> · <code>.last</code> · <code>.export</code>\n\n"
+        f"🔤 <b>ТЕКСТ:</b> <code>.sw</code> · <code>.reverse</code> · <code>.upper</code> · <code>.lower</code> · <code>.bold</code> · <code>.italic</code> · <code>.code</code> · <code>.spoiler</code> · <code>.strike</code> · <code>.len</code>\n\n"
+        f"🎮 <b>ИГРЫ:</b> <code>.bal</code> · <code>.work</code> · <code>.casino [ставка]</code> · <code>.slot</code> · <code>.dice</code> · <code>.coin</code> · <code>.ball</code> · <code>.choose</code> · <code>.roulette</code> · <code>.pay [id] [сумма]</code> · <code>.rand [от] [до]</code> · <code>.percent [текст]</code>\n\n"
+        f"🛠 <b>АДМИН:</b> <code>.admin</code> · <code>.give [ID] [дней]</code>"
     )
-    await send_clean_reply(message, text, reply_markup=admin_kb(message.from_user.id))
+    await savemod_edit_or_reply(message, text)
 
-
-@router.message(F.text.lower().in_({".shop", ".vip", ".магазин"}))
-@router.business_message(F.text.lower().in_({".shop", ".vip", ".магазин"}))
-async def cmd_shop(message: Message):
+# --- Управление и Профиль ---
+@router.message(F.text.lower().in_({".profile", ".профиль"}))
+@router.business_message(F.text.lower().in_({".profile", ".профиль"}))
+async def cmd_profile(message: Message):
     uid = message.from_user.id
     sub = await get_subscription(uid)
-    status = f"✅ VIP активен до: <b>{sub['until'][:10]}</b>\n\n" if sub["active"] else "❌ VIP-подписка не активна\n\n"
-    await send_clean_reply(message, f"💎 <b>Магазин VIP-подписок</b>\n\n{status}Выберите подписку:", reply_markup=shop_kb(uid))
-
+    vip_status = f"✅ VIP до {sub['until'][:10]}" if sub["active"] else "❌ Нет VIP"
+    text = (
+        f"👤 <b>Профиль пользователя:</b>\n"
+        f"🆔 ID: <code>{uid}</code>\n"
+        f"👤 Имя: <b>{message.from_user.full_name}</b>\n"
+        f"💎 Статус: <b>{vip_status}</b>"
+    )
+    await savemod_edit_or_reply(message, text, reply_markup=menu_kb(uid))
 
 @router.message(F.text.lower().in_({".stats", ".стата"}))
 @router.business_message(F.text.lower().in_({".stats", ".стата"}))
@@ -201,100 +128,164 @@ async def cmd_stats(message: Message):
     stats = await get_user_stats(uid)
     sub = await get_subscription(uid)
     if not stats:
-        await send_clean_reply(message, "Пока нет данных для статистики.")
-        return
-    vip = f"\n💎 VIP активен до {sub['until'][:10]}" if sub["active"] else ""
+        return await savemod_edit_or_reply(message, "Пока нет сохранённых данных.")
     text = (
         f"📊 <b>Ваша статистика:</b>\n\n"
         f"📥 Сохранено сообщений: <b>{stats['total_saved']}</b>\n"
         f"🗑 Перехвачено удалений: <b>{stats['total_deleted']}</b>\n"
-        f"✏️ Перехвачено правок: <b>{stats['total_edited']}</b>{vip}"
+        f"✏️ Перехвачено правок: <b>{stats['total_edited']}</b>"
     )
-    await send_clean_reply(message, text, reply_markup=menu_kb(uid))
-
+    await savemod_edit_or_reply(message, text, reply_markup=menu_kb(uid))
 
 @router.message(F.text.lower().in_({".settings", ".настройки"}))
 @router.business_message(F.text.lower().in_({".settings", ".настройки"}))
 async def cmd_settings(message: Message):
     uid = message.from_user.id
     s = await get_user_settings(uid)
-    await send_clean_reply(message, "⚙️ <b>Настройки перехвата:</b>", reply_markup=settings_kb(uid, s))
+    await savemod_edit_or_reply(message, "⚙️ <b>Настройки перехватчика:</b>", reply_markup=settings_kb(uid, s))
 
+@router.message(F.text.lower().in_({".shop", ".vip", ".магазин"}))
+@router.business_message(F.text.lower().in_({".shop", ".vip", ".магазин"}))
+async def cmd_shop(message: Message):
+    uid = message.from_user.id
+    await savemod_edit_or_reply(message, "💎 <b>Магазин подписок:</b>", reply_markup=shop_kb(uid))
 
-# ===== CALLBACK HANDLERS =====
+# --- Системные проверки ---
+@router.message(F.text.lower() == ".ping")
+@router.business_message(F.text.lower() == ".ping")
+async def cmd_ping(message: Message):
+    await savemod_edit_or_reply(message, "🏓 <b>ПОНГ!</b> Бот работает в штатном режиме.")
 
-@router.callback_query(F.data.startswith("trial:"))
-async def cb_trial(c: CallbackQuery):
-    if not await check_ownership(c): return
-    uid = c.from_user.id
-    ok = await start_trial(uid, TRIAL_DAYS)
-    if ok:
-        sub = await get_subscription(uid)
-        instruction_text = (
-            f"🎉 <b>Пробный период на {TRIAL_DAYS} дня успешно активирован!</b>\n"
-            f"🗓 Истекает: <code>{sub['until'][:16]}</code>\n\n"
-            f"📱 <b>Инструкция по установке модификации:</b>\n"
-            f"1️⃣ Откройте <b>Настройки Telegram</b>.\n"
-            f"2️⃣ Перейдите в <b>Telegram Business (Автоматизация чатов)</b>.\n"
-            f"3️⃣ Выберите <b>Чаты / Чат-боты</b>.\n"
-            f"4️⃣ Нажмите <b>Добавить бота</b> и укажите юзернейм нашего бота.\n\n"
-            f"🚀 <i>Готово! Теперь бот автоматически сохраняет удаленные сообщения.</i>"
-        )
-        await c.message.edit_text(instruction_text, reply_markup=menu_kb(uid), parse_mode="HTML")
-    else:
-        await c.answer("Пробный период уже был использован!", show_alert=True)
-    await c.answer()
+@router.message(F.text.lower() == ".id")
+@router.business_message(F.text.lower() == ".id")
+async def cmd_id(message: Message):
+    await savemod_edit_or_reply(message, f"🆔 Ваш Telegram ID: <code>{message.from_user.id}</code>")
 
+# --- Поиск по логам (.search) ---
+@router.message(F.text.lower().startswith((".search ", ".поиск ")))
+@router.business_message(F.text.lower().startswith((".search ", ".поиск ")))
+async def cmd_search(message: Message):
+    uid = message.from_user.id
+    query = message.text.split(maxsplit=1)[1]
+    results = await search_messages(uid, query)
+    if not results:
+        return await savemod_edit_or_reply(message, f"🔍 По запросу «{query}» ничего не найдено.")
+    
+    text = f"🔍 <b>Результаты поиска «{query}»:</b>\n\n"
+    for r in results[:5]:
+        text += f"💬 <code>{r['text']}</code>\n\n"
+    await savemod_edit_or_reply(message, text)
 
-@router.callback_query(F.data.startswith("admin_panel:"))
-async def cb_admin(c: CallbackQuery):
-    if not await check_ownership(c): return
-    if int(c.from_user.id) != int(ADMIN_ID):
-        await c.answer("⛔ Доступ запрещен!", show_alert=True)
-        return
+# --- Экспорт логов (.export) ---
+@router.message(F.text.lower() == ".export")
+@router.business_message(F.text.lower() == ".export")
+async def cmd_export(message: Message):
+    uid = message.from_user.id
+    data = await export_user_messages(uid)
+    if not data:
+        return await savemod_edit_or_reply(message, "❌ Нет сохраненных сообщений для экспорта.")
+    
+    json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
+    from aiogram.types import BufferedInputFile
+    file = BufferedInputFile(json_bytes, filename=f"logs_{uid}.json")
+    await message.answer_document(file, caption="📂 Ваши экспортированные логи сообщений")
+
+# --- Текстовые Утилиты ---
+@router.message(F.text.lower().startswith(".sw "))
+@router.business_message(F.text.lower().startswith(".sw "))
+async def cmd_sw(message: Message):
+    raw = message.text[4:]
+    eng = "qwertyuiop[]asdfghjkl;'zxcvbnm,./QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>?"
+    rus = "йцукенгшщзхъфывапролджэячсмитьбю.ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,"
+    tr = str.maketrans(eng + rus, rus + eng)
+    await savemod_edit_or_reply(message, raw.translate(tr))
+
+@router.message(F.text.lower().startswith(".reverse "))
+@router.business_message(F.text.lower().startswith(".reverse "))
+async def cmd_reverse(message: Message):
+    raw = message.text.split(maxsplit=1)[1]
+    await savemod_edit_or_reply(message, raw[::-1])
+
+@router.message(F.text.lower().startswith(".upper "))
+@router.business_message(F.text.lower().startswith(".upper "))
+async def cmd_upper(message: Message):
+    raw = message.text.split(maxsplit=1)[1]
+    await savemod_edit_or_reply(message, raw.upper())
+
+@router.message(F.text.lower().startswith(".lower "))
+@router.business_message(F.text.lower().startswith(".lower "))
+async def cmd_lower(message: Message):
+    raw = message.text.split(maxsplit=1)[1]
+    await savemod_edit_or_reply(message, raw.lower())
+
+@router.message(F.text.lower().startswith(".bold "))
+@router.business_message(F.text.lower().startswith(".bold "))
+async def cmd_bold(message: Message):
+    raw = message.text.split(maxsplit=1)[1]
+    await savemod_edit_or_reply(message, f"<b>{raw}</b>")
+
+@router.message(F.text.lower().startswith(".italic "))
+@router.business_message(F.text.lower().startswith(".italic "))
+async def cmd_italic(message: Message):
+    raw = message.text.split(maxsplit=1)[1]
+    await savemod_edit_or_reply(message, f"<i>{raw}</i>")
+
+@router.message(F.text.lower().startswith(".code "))
+@router.business_message(F.text.lower().startswith(".code "))
+async def cmd_code(message: Message):
+    raw = message.text.split(maxsplit=1)[1]
+    await savemod_edit_or_reply(message, f"<code>{raw}</code>")
+
+@router.message(F.text.lower().startswith(".spoiler "))
+@router.business_message(F.text.lower().startswith(".spoiler "))
+async def cmd_spoiler(message: Message):
+    raw = message.text.split(maxsplit=1)[1]
+    await savemod_edit_or_reply(message, f"<tg-spoiler>{raw}</tg-spoiler>")
+
+@router.message(F.text.lower().startswith(".strike "))
+@router.business_message(F.text.lower().startswith(".strike "))
+async def cmd_strike(message: Message):
+    raw = message.text.split(maxsplit=1)[1]
+    await savemod_edit_or_reply(message, f"<s>{raw}</s>")
+
+@router.message(F.text.lower().startswith(".len "))
+@router.business_message(F.text.lower().startswith(".len "))
+async def cmd_len(message: Message):
+    raw = message.text.split(maxsplit=1)[1]
+    await savemod_edit_or_reply(message, f"📏 Длина текста: <b>{len(raw)}</b> симв.")
+
+@router.message(F.text.lower().startswith((".rand ", ".рандом ")))
+@router.business_message(F.text.lower().startswith((".rand ", ".рандом ")))
+async def cmd_rand(message: Message):
+    try:
+        parts = message.text.split()
+        val = random.randint(int(parts[1]), int(parts[2]))
+        await savemod_edit_or_reply(message, f"🎲 Случайное число: <b>{val}</b>")
+    except Exception:
+        await savemod_edit_or_reply(message, "❌ <b>Использование:</b> <code>.rand 1 100</code>")
+
+@router.message(F.text.lower().startswith(".percent "))
+@router.business_message(F.text.lower().startswith(".percent "))
+async def cmd_percent(message: Message):
+    raw = message.text.split(maxsplit=1)[1]
+    val = random.randint(0, 100)
+    await savemod_edit_or_reply(message, f"📊 Вероятность «{raw}»: <b>{val}%</b>")
+
+# --- Админка ---
+@router.message(F.text.lower() == ".admin")
+@router.business_message(F.text.lower() == ".admin")
+async def cmd_admin(message: Message):
+    if int(message.from_user.id) != int(ADMIN_ID): return
     count = await get_all_users_count()
-    await c.message.edit_text(f"🛠 <b>Админ панель</b>\nПользователей: <b>{count}</b>", reply_markup=admin_kb(c.from_user.id), parse_mode="HTML")
-    await c.answer()
+    await savemod_edit_or_reply(message, f"🛠 <b>Админ Панель</b>\nВсего пользователей: <b>{count}</b>", reply_markup=admin_kb(message.from_user.id))
 
-
-@router.callback_query(F.data.startswith("admin_users:"))
-async def cb_admin_users(c: CallbackQuery):
-    if not await check_ownership(c): return
-    if int(c.from_user.id) != int(ADMIN_ID): return
-    import aiosqlite
-    from config import DB_PATH
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT user_id, username, full_name, is_vip FROM users ORDER BY joined_at DESC LIMIT 30") as cur:
-            rows = await cur.fetchall()
-    lines = ["👥 <b>Пользователи</b> (до 30):\n"]
-    for r in rows:
-        vip = "💎 " if r["is_vip"] else ""
-        lines.append(f"{vip}<code>{r['user_id']}</code> {r['full_name'] or ''} @{r['username'] or '—'}")
-    b = InlineKeyboardBuilder()
-    b.button(text="◀️ Назад", callback_data=f"admin_panel:{c.from_user.id}")
-    await c.message.edit_text("\n".join(lines)[:3500], reply_markup=b.as_markup(), parse_mode="HTML")
-    await c.answer()
-
-
-@router.callback_query(F.data.startswith("back_main:"))
-async def cb_back(c: CallbackQuery):
-    if not await check_ownership(c): return
-    uid = c.from_user.id
-    await c.message.edit_text("⚡ <b>Главное меню:</b>", reply_markup=menu_kb(uid), parse_mode="HTML")
-    await c.answer()
-
-
-@router.callback_query(F.data.startswith("tog_"))
-async def cb_tog(c: CallbackQuery):
-    if not await check_ownership(c): return
-    uid = c.from_user.id
-    s = await get_user_settings(uid)
-    key_raw = c.data.split(":")[0]
-    m = {"tog_own": "save_own", "tog_media": "save_media", "tog_del": "notify_delete", "tog_edit": "notify_edit"}
-    k = m.get(key_raw)
-    if k:
-        s[k] = not s.get(k, True)
-        await update_user_settings(uid, s)
-    await c.message.edit_reply_markup(reply_markup=settings_kb(uid, s))
-    await c.answer("Настройки обновлены")
+@router.message(F.text.lower().startswith(".give "))
+@router.business_message(F.text.lower().startswith(".give "))
+async def cmd_give(message: Message):
+    if int(message.from_user.id) != int(ADMIN_ID): return
+    try:
+        _, target_id, days = message.text.split()
+        await grant_days(int(target_id), int(days))
+        await savemod_edit_or_reply(message, f"✅ Пользователю <code>{target_id}</code> выдано <b>{days}</b> дней VIP!")
+    except Exception:
+        await savemod_edit_or_reply(message, "❌ <b>Ошибка! Использование:</b> <code>.give [ID] [дней]</code>")
