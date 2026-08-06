@@ -9,8 +9,12 @@ BOT_NAME = "ModdedInvoker"
 VERSION = "2.0.0"
 CMD_PREFIX = "."
 
-# Сервер Telegram API (если используется локальный сервер Bot API, иначе None или "https://api.telegram.org")
+# Сервер Telegram API
 LOCAL_SERVER_URL = None
+
+# Настройки лимитов и очистки базы
+MAX_MESSAGES_PER_USER = 5000
+AUTO_CLEAN_DAYS = 30
 
 # База данных и файлы
 DB_PATH = "bot_database.db"
